@@ -26,15 +26,34 @@ def init_db():
     with get_db() as db:
         db.executescript("""
             CREATE TABLE IF NOT EXISTS users (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                email           TEXT    UNIQUE NOT NULL,
-                password_hash   TEXT    NOT NULL,
-                signup_ts       REAL    NOT NULL,
-                payment_status  TEXT    NOT NULL DEFAULT 'Trial',
-                tx_hash         TEXT,
-                is_admin        INTEGER NOT NULL DEFAULT 0
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                email               TEXT    UNIQUE NOT NULL,
+                password_hash       TEXT    NOT NULL,
+                signup_ts           REAL    NOT NULL,
+                payment_status      TEXT    NOT NULL DEFAULT 'Trial',
+                tx_hash             TEXT,
+                is_admin            INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                email        TEXT    NOT NULL,
+                subject      TEXT    NOT NULL,
+                message      TEXT    NOT NULL,
+                submitted_ts REAL    NOT NULL,
+                read         INTEGER NOT NULL DEFAULT 0
             );
         """)
+        # Migrate: add new columns if they don't exist yet
+        for col, definition in [
+            ("subscription_end_ts", "REAL"),
+            ("plan_type",           "TEXT"),
+            ("referred_by",         "TEXT"),
+        ]:
+            try:
+                db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
+            except Exception:
+                pass  # column already exists
+        db.commit()
         existing = db.execute(
             "SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)
         ).fetchone()
@@ -67,6 +86,14 @@ def get_user_by_id(user_id: int):
 
 def trial_status(user) -> dict:
     if user["payment_status"] == "Active":
+        # Check if a time-limited subscription has expired
+        end_ts = user["subscription_end_ts"] if "subscription_end_ts" in user.keys() else None
+        if end_ts and datetime.utcnow() > datetime.utcfromtimestamp(end_ts):
+            # Subscription lapsed — revert to expired state
+            with get_db() as db:
+                db.execute("UPDATE users SET payment_status='Trial' WHERE id=?", (user["id"],))
+                db.commit()
+            return {"locked": True, "status": "expired", "hours_left": 0}
         return {"locked": False, "status": "active", "hours_left": None}
     if user["payment_status"] == "Pending":
         return {"locked": False, "status": "pending", "hours_left": None}
@@ -308,12 +335,13 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
     <div class="auth-brand">Skill Shield BTC</div>
     <div class="auth-tagline">Institutional Crypto Whale Intelligence</div>
     <div class="auth-headline">
-      See what whales are doing<br><span>before the market moves.</span>
+      Institutional mempool signals,<br><span>verifiable in real time.</span>
     </div>
     <p class="auth-desc">
-      Skill Shield BTC fuses real-time mempool data, on-chain flow analysis,
-      and network velocity signals into a single institutional-grade dashboard —
-      giving you the same intelligence edge used by crypto hedge funds.
+      Skill Shield BTC fuses live mempool data, on-chain flow analysis, and
+      network velocity into a single dashboard — every transaction links
+      directly to mempool.space so you can independently verify every signal
+      we show you.
     </p>
     <ul class="feat-list">
       <li class="feat-item">
@@ -327,7 +355,7 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
         <div class="feat-icon">⚡</div>
         <div class="feat-text">
           <div class="feat-title">Network Velocity Monitor</div>
-          <div class="feat-desc">Pre-price mempool throughput spikes that expose institutional accumulation events 4–12 hours early.</div>
+          <div class="feat-desc">Real-time mempool throughput vs. 24-hour baseline, so you can see accumulation or distribution spikes as they happen — before they confirm on-chain.</div>
         </div>
       </li>
       <li class="feat-item">
@@ -345,11 +373,10 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
         </div>
       </li>
     </ul>
-    <!-- Live user counter -->
+    <!-- Data source badge (replaces fabricated user counter) -->
     <div class="counter-block">
       <div class="counter-inner">
-        <div class="counter-num"><span id="live-counter">4,850</span>+</div>
-        <div class="counter-label">Institutional Traders Active</div>
+        <div class="counter-label">Live mempool data sourced directly from blockchain.info · verifiable on mempool.space</div>
       </div>
       <div class="counter-pulse-wrap">
         <span class="counter-pulse"></span>
@@ -359,7 +386,7 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
     <div class="trust-row">
       <div class="trust-item"><span class="trust-dot"></span>Live blockchain data</div>
       <div class="trust-item"><span class="trust-dot"></span>No subscription traps</div>
-      <div class="trust-item"><span class="trust-dot"></span>$99 lifetime — one payment</div>
+      <div class="trust-item"><span class="trust-dot"></span>$99/mo or $999/yr</div>
       <div class="trust-item"><span class="trust-dot"></span>48h free trial</div>
     </div>
   </div>
@@ -369,7 +396,7 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
     <div class="card-wrap">
       <div class="card-eyebrow">🔐 Secure Access Portal</div>
       <div class="card">
-        <div class="price-pill"><span class="price-pill-dot"></span>$99 — Lifetime Access · 48h Free Trial</div>
+        <div class="price-pill"><span class="price-pill-dot"></span>$99/mo or $999/yr · 48h Free Trial</div>
         <div class="card-title">__TITLE__</div>
         <div class="card-sub">__SUB__</div>
         __TRIAL_BADGE__
@@ -389,38 +416,6 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
   </div>
 
 </div>
-<script>
-(function(){
-  var el=document.getElementById('live-counter');
-  if(!el)return;
-  var target=4850;
-  var start=4820;
-  var current=start;
-  var duration=1800;
-  var startTime=null;
-  function fmt(n){return n.toLocaleString('en-US')}
-  function easeOut(t){return 1-(1-t)*(1-t)}
-  function animate(ts){
-    if(!startTime)startTime=ts;
-    var elapsed=ts-startTime;
-    var progress=Math.min(elapsed/duration,1);
-    current=Math.round(start+(target-start)*easeOut(progress));
-    el.textContent=fmt(current);
-    if(progress<1){requestAnimationFrame(animate);}
-    else{startSlowIncrement();}
-  }
-  requestAnimationFrame(animate);
-  function startSlowIncrement(){
-    function bump(){
-      current+=1;
-      el.textContent=fmt(current);
-      var nextDelay=45000+Math.random()*75000;
-      setTimeout(bump,nextDelay);
-    }
-    setTimeout(bump,60000+Math.random()*60000);
-  }
-})();
-</script>
 </body>
 </html>"""
 
@@ -465,6 +460,9 @@ def signup_page():
     if "user_id" in session:
         return redirect(url_for("dashboard"))
     msg = ""
+    # Preserve ref code across GET and POST
+    ref_code = request.args.get("ref", "") or request.form.get("ref_code", "")
+    ref_code = ref_code.strip()[:64]  # sanitise length
     if request.method == "POST":
         email = request.form.get("email", "").lower().strip()
         password = request.form.get("password", "")
@@ -478,16 +476,20 @@ def signup_page():
         else:
             with get_db() as db:
                 db.execute(
-                    "INSERT INTO users (email,password_hash,signup_ts,payment_status) VALUES (?,?,?,?)",
-                    (email, _hash(password), datetime.utcnow().timestamp(), "Trial"),
+                    "INSERT INTO users (email,password_hash,signup_ts,payment_status,referred_by) VALUES (?,?,?,?,?)",
+                    (email, _hash(password), datetime.utcnow().timestamp(), "Trial",
+                     ref_code if ref_code else None),
                 )
                 db.commit()
             user = get_user_by_email(email)
             session["user_id"] = user["id"]
             return redirect(url_for("dashboard"))
-    extra = """
+    # Pass ref code as hidden field so it survives form submission
+    ref_field = f'<input type="hidden" name="ref_code" value="{ref_code}">' if ref_code else ""
+    extra = f"""
     <label for="confirm">Confirm Password</label>
     <input type="password" id="confirm" name="confirm" placeholder="••••••••" required autocomplete="new-password">
+    {ref_field}
     """
     badge = '<div class="trial-badge">✅ <b>48-Hour Free Trial</b> — Full access to all whale intelligence tools. No credit card required to start.</div>'
     return _render_auth(
@@ -497,6 +499,28 @@ def signup_page():
         'Already have an account? <a href="/login">Sign In</a>',
         msg=msg, extra=extra, trial_badge=badge, ac="new-password",
     )
+
+
+@auth_bp.route("/contact", methods=["POST"])
+def contact():
+    from flask import jsonify
+    import json as _json
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    email   = (data.get("email",   "") or "").strip()
+    subject = (data.get("subject", "") or "").strip()
+    message = (data.get("message", "") or "").strip()
+    if not email or not subject or not message:
+        return jsonify({"ok": False, "error": "All fields are required."}), 400
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO support_messages (email, subject, message, submitted_ts) VALUES (?,?,?,?)",
+            (email, subject, message, datetime.utcnow().timestamp()),
+        )
+        db.commit()
+    return jsonify({"ok": True})
 
 
 @auth_bp.route("/logout")
@@ -509,12 +533,15 @@ def logout():
 def submit_payment():
     if "user_id" not in session:
         return redirect(url_for("auth.login_page"))
-    tx_hash = request.form.get("tx_hash", "").strip()
+    tx_hash   = request.form.get("tx_hash",   "").strip()
+    plan_type = request.form.get("plan_type", "monthly").strip().capitalize()  # "Monthly" or "Yearly"
+    if plan_type not in ("Monthly", "Yearly"):
+        plan_type = "Monthly"
     if tx_hash:
         with get_db() as db:
             db.execute(
-                "UPDATE users SET tx_hash=?, payment_status='Pending' WHERE id=?",
-                (tx_hash, session["user_id"]),
+                "UPDATE users SET tx_hash=?, payment_status='Pending', plan_type=? WHERE id=?",
+                (tx_hash, plan_type, session["user_id"]),
             )
             db.commit()
     return redirect(url_for("dashboard"))

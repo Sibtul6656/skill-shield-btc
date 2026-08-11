@@ -59,14 +59,30 @@ def admin_portal():
     if request.method == "POST":
         action  = request.form.get("action")
         user_id = request.form.get("user_id")
-        if action == "activate":
+        if action == "approve_monthly":
+            end_ts = (datetime.utcnow() + timedelta(days=30)).timestamp()
             with get_db() as db:
-                db.execute("UPDATE users SET payment_status='Active' WHERE id=?", (user_id,))
+                db.execute(
+                    "UPDATE users SET payment_status='Active', subscription_end_ts=?, plan_type='Monthly' WHERE id=?",
+                    (end_ts, user_id),
+                )
                 db.commit()
-            msg = "✅ Account activated."
+            msg = "✅ Monthly plan activated (30 days)."
+        elif action == "approve_yearly":
+            end_ts = (datetime.utcnow() + timedelta(days=365)).timestamp()
+            with get_db() as db:
+                db.execute(
+                    "UPDATE users SET payment_status='Active', subscription_end_ts=?, plan_type='Yearly' WHERE id=?",
+                    (end_ts, user_id),
+                )
+                db.commit()
+            msg = "✅ Yearly plan activated (365 days)."
         elif action == "revoke":
             with get_db() as db:
-                db.execute("UPDATE users SET payment_status='Trial' WHERE id=?", (user_id,))
+                db.execute(
+                    "UPDATE users SET payment_status='Trial', subscription_end_ts=NULL, plan_type=NULL WHERE id=?",
+                    (user_id,),
+                )
                 db.commit()
             msg = "⚠ Account revoked back to Trial."
 
@@ -87,9 +103,22 @@ def admin_portal():
         expiry = ts + timedelta(hours=TRIAL_HOURS)
         now    = datetime.utcnow()
 
+        sub_end_ts = u["subscription_end_ts"] if "subscription_end_ts" in u.keys() else None
+        plan_type  = u["plan_type"]           if "plan_type"           in u.keys() else None
+        referred   = u["referred_by"]         if "referred_by"         in u.keys() else None
+
         if u["payment_status"] == "Active":
             pill = '<span class="pill pill-active">ACTIVE</span>'
-            exp  = "Lifetime"
+            if sub_end_ts:
+                sub_end_dt = datetime.utcfromtimestamp(sub_end_ts)
+                days_left  = (sub_end_dt - now).days
+                plan_label = plan_type or "Paid"
+                if days_left >= 0:
+                    exp = f"{plan_label} · expires {sub_end_dt.strftime('%Y-%m-%d')} ({days_left}d)"
+                else:
+                    exp = f"{plan_label} · expired"
+            else:
+                exp = (plan_type or "Active") + " · no end date"
         elif u["payment_status"] == "Pending":
             pill = '<span class="pill pill-pending">PENDING</span>'
             exp  = "Awaiting verify"
@@ -111,14 +140,21 @@ def admin_portal():
             if u["tx_hash"] else '<span class="no-hash">—</span>'
         )
 
+        ref_cell = f'<span style="color:#79c0ff;font-size:0.8em">{referred}</span>' if referred else '<span class="no-hash">—</span>'
+
         actions = ""
         if not u["is_admin"]:
             if u["payment_status"] != "Active":
                 actions += f"""
-                <form method="POST" style="display:inline">
-                  <input type="hidden" name="action" value="activate">
+                <form method="POST" style="display:inline;margin-right:4px">
+                  <input type="hidden" name="action" value="approve_monthly">
                   <input type="hidden" name="user_id" value="{u['id']}">
-                  <button class="btn-activate">✅ Activate</button>
+                  <button class="btn-activate" style="font-size:0.7em;padding:5px 10px" title="Grant 30 days access">✅ Monthly</button>
+                </form>
+                <form method="POST" style="display:inline">
+                  <input type="hidden" name="action" value="approve_yearly">
+                  <input type="hidden" name="user_id" value="{u['id']}">
+                  <button class="btn-activate" style="font-size:0.7em;padding:5px 10px;background:linear-gradient(135deg,#238636,#3fb950)" title="Grant 365 days access">✅ Yearly</button>
                 </form>"""
             else:
                 actions += f"""
@@ -133,10 +169,31 @@ def admin_portal():
           <td style="color:#fff;font-weight:600">{u["email"]}</td>
           <td style="color:#8b949e">{ts_s}</td>
           <td>{pill}</td>
-          <td style="color:#79c0ff">{exp}</td>
+          <td style="color:#79c0ff;font-size:0.82em">{exp}</td>
           <td>{tx_cell}</td>
+          <td>{ref_cell}</td>
           <td>{actions}</td>
         </tr>"""
+
+    # Support messages
+    with get_db() as db:
+        support_msgs = db.execute(
+            "SELECT * FROM support_messages ORDER BY submitted_ts DESC"
+        ).fetchall()
+    support_rows = ""
+    if not support_msgs:
+        support_rows = '<tr><td colspan="4" style="color:#6e7681;text-align:center;padding:20px">No support messages yet.</td></tr>'
+    else:
+        for sm in support_msgs:
+            ts_s = datetime.utcfromtimestamp(sm["submitted_ts"]).strftime("%Y-%m-%d %H:%M UTC")
+            msg_preview = sm["message"][:200] + ("…" if len(sm["message"]) > 200 else "")
+            support_rows += f"""
+            <tr>
+              <td style="color:#79c0ff"><a href="mailto:{sm['email']}" style="color:#79c0ff">{sm['email']}</a></td>
+              <td style="color:#e6edf3;font-weight:600">{sm['subject']}</td>
+              <td style="color:#8b949e;white-space:pre-wrap;max-width:400px">{msg_preview}</td>
+              <td style="color:#6e7681">{ts_s}</td>
+            </tr>"""
 
     msg_html = f'<div style="margin-bottom:16px;padding:10px 16px;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.3);border-radius:8px;color:#3fb950;font-size:0.84em">{msg}</div>' if msg else ""
 
@@ -159,7 +216,7 @@ def admin_portal():
 </div>
 <div class="container">
   <h1>User Management Dashboard</h1>
-  <div class="subtitle">Manage trial users, verify TxIDs, and activate lifetime premium access.</div>
+  <div class="subtitle">Manage trial users, verify TxIDs, and activate subscription access.</div>
   {msg_html}
   <div class="stats-row">
     <div class="stat-card">
@@ -186,12 +243,29 @@ def admin_portal():
           <th>Email</th>
           <th>Sign-up Date</th>
           <th>Status</th>
-          <th>Trial / Expiry</th>
+          <th>Plan / Expiry</th>
           <th>TxID (Payment Hash)</th>
+          <th>Referred By</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
+    </table>
+  </div>
+
+  <h1 style="margin-top:36px">Support Messages</h1>
+  <div class="subtitle">Contact form submissions from users — reply to their registered email.</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>From</th>
+          <th>Subject</th>
+          <th>Message</th>
+          <th>Received</th>
+        </tr>
+      </thead>
+      <tbody>{support_rows}</tbody>
     </table>
   </div>
 </div>
