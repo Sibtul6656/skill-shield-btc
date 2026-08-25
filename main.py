@@ -13,6 +13,13 @@ from email.utils import parsedate_to_datetime
 from email.message import EmailMessage
 from urllib.parse import quote
 
+# Loads variables from a local ".env" file (if present) into os.environ, so you
+# can test SMTP / webhook features on your own machine without setting them in
+# the terminal every time. On Render (or any host without a ".env" file) this
+# simply does nothing — it never overrides real hosting env vars.
+from dotenv import load_dotenv
+load_dotenv()
+
 from auth import auth_bp, init_db, get_user_by_id, trial_status, login_required
 from admin import admin_bp
 
@@ -1081,6 +1088,21 @@ def pro_leads():
         return jsonify({"ok": False, "error": "Enter a valid name and email address."}), 400
     if lead["platform"] not in allowed or not lead["handle"]:
         return jsonify({"ok": False, "error": "Choose a contact platform and add your handle."}), 400
+
+    # 👇 Save the submitted lead directly into the SQLite database
+    try:
+        import sqlite3
+        conn = sqlite3.connect("skillshield.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO pro_leads (name, email, platform, handle, submitted_ts) VALUES (?, ?, ?, ?, ?)",
+            (lead["name"], lead["email"], lead["platform"], lead["handle"], lead["submitted_at"])
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("Pro Lead DB Insert Error:", e)
+
     delivered = False
     webhook = os.environ.get("PRO_LEADS_WEBHOOK_URL") or os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL")
     if webhook:
@@ -1089,10 +1111,10 @@ def pro_leads():
             delivered = 200 <= response.status_code < 300
         except Exception:
             delivered = False
+            
     emailed = _send_pro_welcome_email(lead)
-    # Access is granted after validation even when optional external delivery is not configured.
+    
     return jsonify({"ok": True, "sheet_delivered": delivered, "welcome_sent": emailed})
-
 
 @app.route("/pro-analysis.json")
 @login_required
@@ -1453,7 +1475,7 @@ def dashboard():
                 <div class="legacy-stat-value" style="color:{risk_status_color};">{risk_status_label}</div>
             </div>
         </div>
-        <article aria-label="High-value legacy Bitcoin address activity log">
+        <article aria-label="High-value legacy Bitcoin address activity log" class="legacy-table-scroll">
             <table class="legacy-table" role="table">
                 <thead>
                     <tr>
@@ -1975,6 +1997,13 @@ def dashboard():
             <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
             <style>
                 * {{ box-sizing: border-box; }}
+                /* Chart.js canvases carry a default HTML width/height (300x150)
+                   until the CDN script finishes loading and resizes them. On a
+                   slow connection — or if the chart CDN is blocked — that raw
+                   canvas width can exceed a narrow phone screen and force the
+                   whole page to scroll horizontally. This guarantees a canvas
+                   never renders wider than its own container. */
+                canvas {{ max-width: 100%; }}
                 body {{
                     background-color: #0d1117; color: #58a6ff;
                     font-family: 'Inter', 'Segoe UI', sans-serif;
@@ -2038,10 +2067,25 @@ def dashboard():
                     grid-row: 2; grid-column: 2;
                     color: #c9d1d9; font-size: 0.95em;
                 }}
+
+                /* Mobile layout fix: keep the sentiment panel stacked and full-width */
                 @media (max-width: 720px) {{
-                    .sentiment {{ grid-template-columns: 1fr; }}
-                    .sentiment-label, .sentiment-value, .sentiment-meter, .sentiment-detail {{
-                        grid-column: 1;
+                    .sentiment {{
+                        display: flex;
+                        flex-direction: column;
+                        grid-template-columns: 1fr;
+                        grid-template-rows: auto;
+                        gap: 12px;
+                        width: 100%;
+                    }}
+
+                    .sentiment-label,
+                    .sentiment-value,
+                    .sentiment-meter,
+                    .sentiment-detail {{
+                        grid-row: auto;
+                        grid-column: auto;
+                        width: 100%;
                     }}
                 }}
 
@@ -2698,6 +2742,12 @@ def dashboard():
                     font-size: 0.82em;
                     color: #c9d1d9;
                     box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+                    max-width: 100%; flex-wrap: wrap; justify-content: center;
+                }}
+                @media (max-width: 480px) {{
+                    .integrity-bar {{ padding: 0 16px; }}
+                    .integrity-badge {{ font-size: 0.7em; padding: 8px 12px; border-radius: 14px; }}
+                    .integrity-source {{ display: none; }}
                 }}
                 .integrity-dot {{
                     width: 10px; height: 10px; border-radius: 50%;
@@ -3307,8 +3357,9 @@ def dashboard():
                     .pro-modal {{ padding:18px; }}
                 }}
                 @media (max-width: 600px) {{
-                    .pro-nav-btn {{ padding:6px 8px; }} .pro-nav-btn span:first-child {{ display:none; }}
-                    .ss-nav-user, .ss-nav-upgrade {{ display:none; }}
+                    /* Pro Analysis Signals button now lives in the full-width
+                       mobile nav menu, so keep its label visible there. */
+                    .ss-nav-upgrade {{ padding: 6px 10px; font-size: 0.74em; }}
                     .pro-proof-row {{ flex-wrap:wrap; }} .pro-proof-time {{ min-width:auto; }}
                 }}
                 .pay-modal {{
@@ -3444,6 +3495,10 @@ def dashboard():
                     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
                     gap: 16px;
                 }}
+                @media (max-width: 380px) {{
+                    .academy-section {{ padding: 20px 16px; }}
+                    .academy-chapters {{ grid-template-columns: 1fr; }}
+                }}
                 .academy-chapter {{
                     background: rgba(13,17,23,0.7); border: 1px solid #21262d;
                     border-radius: 10px; padding: 20px;
@@ -3498,8 +3553,38 @@ def dashboard():
                     padding-left: 18px; margin: 8px 0;
                 }}
                 .academy-list li {{ margin-bottom: 6px; }}
+                /* ===== Mobile nav (hamburger) ===== */
+                .ss-nav-toggle {{
+                    display: none; align-items: center; justify-content: center;
+                    width: 36px; height: 36px; flex-shrink: 0;
+                    background: none; border: 1px solid #30363d; border-radius: 8px;
+                    color: #c9d1d9; cursor: pointer; font-size: 1.1em;
+                }}
+                .ss-nav-toggle:hover {{ border-color: #58a6ff; color: #58a6ff; }}
+                /* Collapses into a hamburger menu on phones AND on tablet-width
+                   screens (e.g. iPad portrait, small laptops) — the brand +
+                   links + email + upgrade + admin + logout together are too
+                   wide to fit one row anywhere below ~860px. */
+                @media (max-width: 860px) {{
+                    .ss-nav {{ flex-wrap: wrap; padding: 0 14px; height: auto; min-height: 52px; }}
+                    .ss-nav-toggle {{ display: inline-flex; }}
+                    .ss-nav-links {{
+                        display: none; order: 3; width: 100%;
+                        flex-direction: column; align-items: stretch; gap: 2px;
+                        padding: 8px 0 14px; border-top: 1px solid #21262d; margin-top: 8px;
+                    }}
+                    .ss-nav-links.ss-nav-open {{ display: flex; }}
+                    .ss-nav-link, .pro-nav-btn {{ width: 100%; justify-content: flex-start; box-sizing: border-box; }}
+                    .ss-nav-dropdown {{ width: 100%; }}
+                    .ss-nav-dropdown-content {{
+                        display: none; position: static; box-shadow: none; border: none;
+                        min-width: 0; padding: 0 0 0 14px; margin-top: 2px;
+                    }}
+                    .ss-nav-dropdown.ss-nav-dd-open .ss-nav-dropdown-content {{ display: block; }}
+                    .ss-nav-right {{ gap: 8px; }}
+                    .ss-nav-user {{ display: none; }}
+                }}
                 @media (max-width: 600px) {{
-                    .ss-nav-links {{ display: none; }}
                     .lock-btns {{ grid-template-columns: 1fr; }}
                     .fg-factors {{ grid-template-columns: 1fr 1fr; }}
                 }}
@@ -3616,7 +3701,14 @@ def dashboard():
                     padding: 0 16px; height: 36px;
                     font-size: 0.82em; font-weight: 600; letter-spacing: 0.6px;
                     color: #c9d1d9;
+                    /* Safety net: if content ever exceeds viewport width (very
+                       small phones, long dynamic strings), scroll WITHIN the bar
+                       instead of forcing the whole page to scroll horizontally. */
+                    overflow-x: auto; overflow-y: hidden;
+                    -webkit-overflow-scrolling: touch;
+                    scrollbar-width: none;
                 }}
+                #btc-ticker::-webkit-scrollbar {{ display: none; }}
                 .ticker-left {{
                     display: flex; align-items: center; gap: 8px; flex-shrink: 0;
                 }}
@@ -3629,6 +3721,25 @@ def dashboard():
                 @media (max-width: 480px) {{
                     .ticker-right .live-label,
                     .ticker-right .ticker-vsep {{ display: none; }}
+                }}
+                @media (max-width: 600px) {{
+                    #btc-ticker {{ padding: 0 12px; gap: 12px; justify-content: flex-start; }}
+                    .ticker-left {{ gap: 6px; }}
+                    .ticker-right {{ gap: 5px; }}
+                }}
+                @media (max-width: 420px) {{
+                    /* Trim the refresh-timer text and shrink the two action
+                       buttons to icon-first so the bar fits phones without
+                       needing to scroll at all. The "BTC/USD:" label is
+                       redundant once space is tight — "LIVE: $price" is
+                       already unambiguous. */
+                    .ticker-right > span[style] {{ display: none; }}
+                    .ticker-sym {{ display: none; }}
+                    .live-refresh, .surge-btn {{
+                        padding: 3px 7px !important; font-size: 0.72em !important;
+                        max-width: 84px; overflow: hidden; text-overflow: ellipsis;
+                        white-space: nowrap;
+                    }}
                 }}
                 .ticker-dot {{
                     width: 8px; height: 8px; border-radius: 50%;
@@ -3740,8 +3851,16 @@ def dashboard():
                     0%, 100% {{ border-color: #ff5252; box-shadow: 0 0 0 0 rgba(255,82,82,0.3); }}
                     50%       {{ border-color: #ff7070; box-shadow: 0 0 14px 2px rgba(255,82,82,0.18); }}
                 }}
+                .legacy-table-scroll {{
+                    /* Table scrolls horizontally within its own box on small
+                       screens instead of stretching the whole page width. */
+                    overflow-x: auto; -webkit-overflow-scrolling: touch;
+                }}
                 .legacy-table {{
                     width: 100%; border-collapse: collapse; font-size: 0.82em;
+                }}
+                @media (max-width: 700px) {{
+                    .legacy-table {{ min-width: 480px; }}
                 }}
                 .legacy-table th {{
                     color: #6e7681; font-size: 0.75em;
@@ -3778,20 +3897,22 @@ def dashboard():
                     margin-top: 12px; color: #6e7681; font-size: 0.7em;
                     text-align: right; letter-spacing: 0.3px;
                 }}
-                @media (max-width: 700px) {{
-                    .legacy-table .legacy-bal {{ display: none; }}
-                }}
+                /* Balance column no longer needs to be hidden — the table now
+                   scrolls horizontally within its own container (see
+                   .legacy-table-scroll) so all columns stay reachable. */
             </style>
         </head>
         <body>
             <!-- ===== GLOBAL NAV BAR ===== -->
             <nav class="ss-nav" role="navigation" aria-label="Main navigation">
                 <a href="/" class="ss-nav-brand">🐋 SKILL SHIELD BTC</a>
-                <div class="ss-nav-links">
+                <button type="button" class="ss-nav-toggle" id="ss-nav-toggle"
+                        aria-label="Toggle navigation menu" aria-expanded="false" aria-controls="ss-nav-links">☰</button>
+                <div class="ss-nav-links" id="ss-nav-links">
                     <a href="/" class="ss-nav-link active">Live Dashboard</a>
-                    <div class="ss-nav-dropdown">
+                    <div class="ss-nav-dropdown" id="ss-nav-academy-dd">
                         <a href="#academy" class="ss-nav-link"
-                           onclick="document.getElementById('tool-academy').scrollIntoView({{behavior:'smooth'}});return false;">
+                           onclick="return ssNavHandleAcademyClick(event);">
                             Tool Academy ▾
                         </a>
                         <div class="ss-nav-dropdown-content">
@@ -3814,6 +3935,48 @@ def dashboard():
                     <a href="/logout" class="ss-nav-logout">Sign Out</a>
                 </div>
             </nav>
+            <script>
+                // ===== Mobile nav toggle (hamburger) =====
+                (function() {{
+                    var toggle = document.getElementById('ss-nav-toggle');
+                    var links  = document.getElementById('ss-nav-links');
+                    if (!toggle || !links) return;
+                    toggle.addEventListener('click', function() {{
+                        var open = links.classList.toggle('ss-nav-open');
+                        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                    }});
+                    // Close the menu after a nav link/button is used, so it
+                    // doesn't stay open covering the page on small screens.
+                    links.addEventListener('click', function(e) {{
+                        var t = e.target.closest('.ss-nav-link, .pro-nav-btn');
+                        if (t && !t.closest('.ss-nav-dropdown')) {{
+                            links.classList.remove('ss-nav-open');
+                            toggle.setAttribute('aria-expanded', 'false');
+                        }}
+                    }});
+                    document.addEventListener('click', function(e) {{
+                        if (!links.contains(e.target) && !toggle.contains(e.target)) {{
+                            links.classList.remove('ss-nav-open');
+                            toggle.setAttribute('aria-expanded', 'false');
+                        }}
+                    }});
+                }})();
+                // Tool Academy dropdown: hover works on desktop via CSS;
+                // on touch screens (and inside the mobile menu) this makes
+                // the first tap open the submenu instead of navigating away.
+                function ssNavHandleAcademyClick(e) {{
+                    var dd = document.getElementById('ss-nav-academy-dd');
+                    var isMobile = window.matchMedia('(max-width: 860px)').matches;
+                    var isTouch = window.matchMedia('(hover: none)').matches;
+                    if (isMobile || isTouch) {{
+                        e.preventDefault();
+                        dd.classList.toggle('ss-nav-dd-open');
+                        return false;
+                    }}
+                    document.getElementById('tool-academy').scrollIntoView({{behavior:'smooth'}});
+                    return false;
+                }}
+            </script>
 
             <!-- ===== TRIAL EXPIRED LOCK OVERLAY ===== -->
             <div class="trial-lock-overlay {trial_lock_cls}" id="trial-lock-overlay"
@@ -4412,8 +4575,10 @@ def dashboard():
             <div style="max-width:1500px;margin:0 auto;padding:10px 0 30px;text-align:center;color:#30363d;font-size:0.7em;line-height:1.6">
                 ⚠ Risk Disclaimer: Skill Shield BTC is an educational and analytical tool. All signals are for informational purposes only and do not constitute financial advice. Cryptocurrency trading involves substantial risk of loss. Past signal accuracy does not guarantee future results. Trade responsibly.
                 · <a href="/login" style="color:#30363d">Sign In</a>
+            
                 · <a href="#tool-academy" style="color:#30363d" onclick="document.getElementById('tool-academy').scrollIntoView({{behavior:'smooth'}});return false;">Tool Academy</a>
                 · <a href="/alpha-admin-portal" style="color:#0d1117">.</a>
+          
             </div>
 
             <script>
@@ -4573,7 +4738,7 @@ def dashboard():
                     }}
                     function safeHref(value) {{
                         var href = String(value || '');
-                        return /^https?:\/\//i.test(href) ? href : '#';
+                        return /^https?:/i.test(href) ? href : '#';
                     }}
                     var proof = document.getElementById('pro-proof-list');
                     proof.innerHTML = data.proof_log.map(function(row) {{

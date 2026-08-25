@@ -33,8 +33,10 @@ python main.py
 - `SESSION_SECRET` — used as Flask session secret key (Replit Secret, already configured)
 - `SECRET_KEY` — alternative env var for Flask session secret (optional override)
 - `PRO_LEADS_WEBHOOK_URL` or `GOOGLE_SHEETS_WEBHOOK_URL` — optional HTTPS webhook that receives validated Pro Analysis Signals leads as JSON
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` — optional SMTP settings for the Pro welcome email
+- `SIGNUP_SHEETS_WEBHOOK_URL` — optional HTTPS webhook (Google Apps Script Web App) that receives every new user signup as JSON, so it lands as a row in a Google Sheet stored in Drive. See `google-sheets-webhook-setup.md` for setup steps.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` — optional SMTP settings, shared by the Pro welcome email and the admin notification emails
 - `SMTP_FROM` — optional sender override (defaults to `support@skillshieldbtc.com`)
+- `ADMIN_NOTIFY_EMAIL` — the admin's personal inbox that receives an email every time (a) the footer contact form is submitted, and (b) a new user signs up. Falls back to `SMTP_USER` if not set.
 
 Pro Analysis Signals opens from the dashboard's VIP navigation button. Lead access is remembered in browser
 `localStorage`; the live brief uses public Binance candle data and public crypto RSS feeds. External lead delivery

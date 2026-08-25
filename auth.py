@@ -2,9 +2,13 @@ import sqlite3
 import hashlib
 import os
 import secrets
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Blueprint, request, session, redirect, url_for, Response
+from flask import Blueprint, request, session, redirect, url_for, Response, render_template_string
+
+from notify import notify_admin, send_to_sheet
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -26,13 +30,13 @@ def init_db():
     with get_db() as db:
         db.executescript("""
             CREATE TABLE IF NOT EXISTS users (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                email               TEXT    UNIQUE NOT NULL,
-                password_hash       TEXT    NOT NULL,
-                signup_ts           REAL    NOT NULL,
-                payment_status      TEXT    NOT NULL DEFAULT 'Trial',
-                tx_hash             TEXT,
-                is_admin            INTEGER NOT NULL DEFAULT 0
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                email              TEXT    UNIQUE NOT NULL,
+                password_hash      TEXT    NOT NULL,
+                signup_ts          REAL    NOT NULL,
+                payment_status     TEXT    NOT NULL DEFAULT 'Trial',
+                tx_hash            TEXT,
+                is_admin           INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS support_messages (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,12 +46,21 @@ def init_db():
                 submitted_ts REAL    NOT NULL,
                 read         INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS pro_leads (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT,
+                email        TEXT,
+                platform     TEXT,
+                handle       TEXT,
+                submitted_ts TEXT
+            );
         """)
         # Migrate: add new columns if they don't exist yet
         for col, definition in [
             ("subscription_end_ts", "REAL"),
-            ("plan_type",           "TEXT"),
-            ("referred_by",         "TEXT"),
+            ("plan_type",          "TEXT"),
+            ("referred_by",        "TEXT"),
+            ("reset_token",        "TEXT"),
         ]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
@@ -406,6 +419,9 @@ input:focus{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,0.12)}
           <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
           <label for="password">Password</label>
           <input type="password" id="password" name="password" placeholder="••••••••" required autocomplete="__AC__">
+          <div style="text-align: right; margin-top: 4px; margin-bottom: 14px;">
+    
+</div>
           __EXTRA__
           <button type="submit" class="btn btn-primary">__BTN__</button>
         </form>
@@ -445,15 +461,25 @@ def login_page():
             session["user_id"] = user["id"]
             return redirect(url_for("dashboard"))
         msg = '<div class="error">Invalid email or password. Please try again.</div>'
+    
     badge = '<div class="trial-badge">🔐 New? <a href="/signup" style="color:#58a6ff;font-weight:700;">Create your free account</a> — 48-hour full access trial included.</div>'
+    
+    # Forgot password link HTML to fill into __EXTRA__
+    forgot_link = '''
+    <div style="text-align: right; margin-top: 4px; margin-bottom: 14px;">
+        <a href="/forgot-password" style="color: #58a6ff; font-size: 0.78em; text-decoration: none;">Forgot Password?</a>
+    </div>
+    '''
+    
     return _render_auth(
         "Sign In to Your Account",
         "Access your live whale intelligence dashboard.",
         "Sign In",
         'Don\'t have an account? <a href="/signup">Start Free Trial</a>',
-        msg=msg, trial_badge=badge,
+        msg=msg, 
+        trial_badge=badge,
+        extra=forgot_link
     )
-
 
 @auth_bp.route("/signup", methods=["GET", "POST"])
 def signup_page():
@@ -474,15 +500,40 @@ def signup_page():
         elif get_user_by_email(email):
             msg = '<div class="error">An account with this email already exists. <a href="/login" style="color:#58a6ff;">Sign in instead.</a></div>'
         else:
+            signup_ts = datetime.utcnow().timestamp()
             with get_db() as db:
                 db.execute(
                     "INSERT INTO users (email,password_hash,signup_ts,payment_status,referred_by) VALUES (?,?,?,?,?)",
-                    (email, _hash(password), datetime.utcnow().timestamp(), "Trial",
+                    (email, _hash(password), signup_ts, "Trial",
                      ref_code if ref_code else None),
                 )
                 db.commit()
             user = get_user_by_email(email)
             session["user_id"] = user["id"]
+
+            # Push new-signup data out to Google Sheets (stored in Google Drive) and
+            # notify the admin. Both are no-ops until their env vars are configured —
+            # they never block or fail the signup itself.
+            send_to_sheet(
+                {
+                    "email": email,
+                    "signup_time_utc": datetime.utcfromtimestamp(signup_ts).isoformat() + "Z",
+                    "referred_by": ref_code or "",
+                    "plan_status": "Trial",
+                },
+                webhook_env_var="SIGNUP_SHEETS_WEBHOOK_URL",
+            )
+            notify_admin(
+                subject="[Skill Shield BTC] New user signed up",
+                body=(
+                    f"A new user just created an account.\n\n"
+                    f"Email: {email}\n"
+                    f"Signed up: {datetime.utcfromtimestamp(signup_ts).isoformat()}Z\n"
+                    f"Referred by: {ref_code or '—'}\n"
+                    f"Status: 48-hour free trial started"
+                ),
+            )
+
             return redirect(url_for("dashboard"))
     # Pass ref code as hidden field so it survives form submission
     ref_field = f'<input type="hidden" name="ref_code" value="{ref_code}">' if ref_code else ""
@@ -504,7 +555,6 @@ def signup_page():
 @auth_bp.route("/contact", methods=["POST"])
 def contact():
     from flask import jsonify
-    import json as _json
     try:
         data = request.get_json(force=True) or {}
     except Exception:
@@ -520,6 +570,21 @@ def contact():
             (email, subject, message, datetime.utcnow().timestamp()),
         )
         db.commit()
+
+    # Notify the admin's personal inbox immediately so submissions don't sit
+    # unread in the admin portal. Silently a no-op until SMTP_HOST/SMTP_USER/
+    # SMTP_PASSWORD (and optionally ADMIN_NOTIFY_EMAIL) are configured.
+    notify_admin(
+        subject=f"[Skill Shield BTC] New contact form message: {subject}",
+        body=(
+            f"A visitor submitted the contact form on Skill Shield BTC.\n\n"
+            f"From:    {email}\n"
+            f"Subject: {subject}\n\n"
+            f"Message:\n{message}\n\n"
+            f"— This message is also saved in the admin portal under Support Messages."
+        ),
+    )
+
     return jsonify({"ok": True})
 
 
@@ -545,3 +610,119 @@ def submit_payment():
             )
             db.commit()
     return redirect(url_for("dashboard"))
+
+import secrets
+import smtplib
+from email.message import EmailMessage
+import os
+
+@auth_bp.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        with get_db() as db:
+            user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            if user:
+                token = secrets.token_urlsafe(32)
+                db.execute("UPDATE users SET reset_token = ? WHERE email = ?", (token, email))
+                db.commit()
+                
+                reset_link = url_for("auth.reset_password", token=token, _external=True)
+                send_reset_email(email, reset_link)
+                
+        return render_template_string("""
+        <html>
+            <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
+                <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
+                    <h2 style="color:#fff;">📧 Check Your Email</h2>
+                    <p style="font-size:0.88em; color:#8b949e;">If an account exists with that email, reset instructions have been sent.</p>
+                    <a href="/login" style="color:#58a6ff; font-size:0.85em; text-decoration:none; font-weight:bold;">Return to Sign In</a>
+                </div>
+            </body>
+        </html>
+        """)
+        
+    return render_template_string("""
+    <html>
+        <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
+            <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
+                <h2 style="color:#fff;">Reset Password</h2>
+                <p style="font-size:0.85em; color:#8b949e; margin-bottom:20px;">Enter your registered email address.</p>
+                <form method="POST">
+                    <input type="email" name="email" placeholder="you@example.com" required style="width:100%; padding:11px; background:#0d1117; border:1px solid #30363d; color:#fff; border-radius:6px; margin-bottom:15px; box-sizing:border-box;">
+                    <button type="submit" style="width:100%; padding:11px; background:#238636; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Send Reset Link</button>
+                </form>
+                <p style="margin-top:15px;"><a href="/login" style="color:#58a6ff; font-size:0.8em; text-decoration:none;">Back to Sign In</a></p>
+            </div>
+        </body>
+    </html>
+    """)
+
+@auth_bp.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    with get_db() as db:
+        user = db.execute("SELECT * FROM users WHERE reset_token = ?", (token,)).fetchone()
+        
+    if not user:
+        return "Invalid or expired reset token.", 400
+        
+    if request.method == "POST":
+        new_password = request.form.get("password")
+        hashed_pw = _hash(new_password)
+        
+        with get_db() as db:
+            db.execute("UPDATE users SET password_hash = ?, reset_token = NULL WHERE reset_token = ?", (hashed_pw, token))
+            db.commit()
+            
+        return render_template_string("""
+        <html>
+            <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
+                <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
+                    <h2 style="color:#3fb950;">Password Updated!</h2>
+                    <p style="font-size:0.88em; color:#8b949e;">Your password has been successfully changed.</p>
+                    <a href="/login" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#1f6feb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold;">Sign In Now</a>
+                </div>
+            </body>
+        </html>
+        """)
+        
+    return render_template_string("""
+    <html>
+        <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
+            <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
+                <h2 style="color:#fff;">Set New Password</h2>
+                <form method="POST">
+                    <input type="password" name="password" placeholder="Enter new password" required style="width:100%; padding:11px; background:#0d1117; border:1px solid #30363d; color:#fff; border-radius:6px; margin-bottom:15px; box-sizing:border-box;">
+                    <button type="submit" style="width:100%; padding:11px; background:#1f6feb; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Update Password</button>
+                </form>
+            </div>
+        </body>
+    </html>
+    """)
+
+def send_reset_email(to_email, reset_link):
+    host = os.environ.get("SMTP_HOST")
+    user = os.environ.get("SMTP_USER")
+    password = os.environ.get("SMTP_PASSWORD")
+    
+    if not all((host, user, password)):
+        print("❌ SMTP Error: Missing credentials in .env file!")
+        return False
+        
+    msg = EmailMessage()
+    msg["Subject"] = "Password Reset Request — Skill Shield BTC"
+    msg["From"] = os.environ.get("SMTP_FROM", "support@skillshieldbtc.com")
+    msg["To"] = to_email
+    msg.set_content(f"Hello,\n\nClick the link below to reset your password:\n{reset_link}\n\nIf you didn't request this, please ignore this email.")
+    
+    try:
+        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=10) as smtp:
+            smtp.starttls()
+            smtp.login(user, password)
+            smtp.send_message(msg)
+        print(f"✅ Email successfully sent to {to_email}!")
+        return True
+    except Exception as e:
+        # 👇 This will print the exact Gmail error in your VS Code terminal!
+        print(f"❌ SMTP FAILED with error: {e}")
+        return False
