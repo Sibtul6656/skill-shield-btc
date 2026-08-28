@@ -147,7 +147,11 @@ LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign In — SKILL SHIELD BTC</title>
+<title>SkillShield BTC — Real-Time Bitcoin Mempool Intelligence</title>
+<meta name="description" content="Institutional-grade Bitcoin Mempool intelligence and live on-chain analytics. Track unconfirmed transactions, network congestion, and fee telemetry in real time.">
+<meta name="keywords" content="bitcoin, mempool, on-chain analytics, btc mempool tracker, bitcoin transactions, crypto intelligence">
+<meta name="robots" content="index, follow">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
