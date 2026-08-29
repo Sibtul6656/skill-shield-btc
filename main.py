@@ -1362,17 +1362,19 @@ def dashboard():
     whale_summary = compute_whale_summary()
 
     # ===== Auth / Trial context =====
-    current_user = get_user_by_id(session["user_id"])
-    t_status = trial_status(current_user)
-    trial_locked   = t_status["locked"]
-    trial_status_label = t_status["status"]
-    trial_hours_left   = t_status["hours_left"]
-    user_email = current_user["email"]
-    payment_status_val = current_user["payment_status"]
+ user_id = session.get("user_id")
+    current_user = get_user_by_id(user_id) if user_id else None
+    t_status = trial_status(current_user) if current_user else {"locked": False, "status": "GUEST", "hours_left": 0}
+    trial_locked = t_status.get("locked", False)
+    trial_status_label = t_status.get("status", "GUEST")
+    trial_hours_left = t_status.get("hours_left", 0)
+    user_email = current_user.get("email", "") if current_user else ""
+    payment_status_val = current_user.get("payment_status", "INACTIVE") if current_user else "INACTIVE"
 
     # Pre-compute expiry timestamp for JS countdown (ms)
     import time as _time
-    trial_expiry_ts_ms = int((current_user["signup_ts"] + 48 * 3600) * 1000)
+    signup_val = current_user.get("signup_ts", _time.time()) if current_user else _time.time()
+    trial_expiry_ts_ms = int((signup_val + 48 * 3600) * 1000)
 
     # trial banner HTML
     if trial_status_label == "trial" and trial_hours_left is not None:
