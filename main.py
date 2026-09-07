@@ -1362,7 +1362,7 @@ def dashboard():
     whale_summary = compute_whale_summary()
 
     # ===== Auth / Trial context =====
- user_id = session.get("user_id")
+    user_id = session.get("user_id")
     current_user = get_user_by_id(user_id) if user_id else None
     t_status = trial_status(current_user) if current_user else {"locked": False, "status": "GUEST", "hours_left": 0}
     trial_locked = t_status.get("locked", False)
