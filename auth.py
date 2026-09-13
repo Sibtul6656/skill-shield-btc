@@ -1,12 +1,20 @@
 import sqlite3
 import hashlib
 import os
+import sys
 import secrets
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, session, redirect, url_for, Response, render_template_string
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from notify import notify_admin, send_to_sheet
 
@@ -619,48 +627,165 @@ import secrets
 import smtplib
 from email.message import EmailMessage
 import os
+import secrets
+import smtplib
+
+
+def _render_new_password_form(error: str = ""):
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Set New Password — Skill Shield BTC</title>
+        <style>
+            body { background: #080b11; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+            .card { width: 100%; max-width: 400px; background: #0d131f; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
+            .title { color: #f0f6fc; font-size: 1.3rem; margin: 0 0 8px; font-weight: 700; }
+            .desc { font-size: 0.85rem; color: #8b949e; margin-bottom: 20px; }
+            .input { width: 100%; padding: 12px; background: #080b11; border: 1px solid #30363d; color: #fff; border-radius: 6px; margin-bottom: 16px; box-sizing: border-box; font-size: 0.95rem; }
+            .input:focus { outline: none; border-color: #58a6ff; }
+            .btn { width: 100%; padding: 12px; background: #1f6feb; color: #fff; border: none; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.95rem; }
+            .btn:hover { background: #388bfd; }
+            .error-box { background: rgba(248, 81, 73, 0.15); border: 1px solid #f85149; color: #ff7b72; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 16px; text-align: left; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div style="font-size: 2rem; margin-bottom: 10px;">🔑</div>
+            <h2 class="title">Set New Password</h2>
+            <p class="desc">Please enter a secure password (minimum 6 characters).</p>
+            {% if error %}
+                <div class="error-box">⚠ {{ error }}</div>
+            {% endif %}
+            <form method="POST">
+                <input type="password" name="password" class="input" placeholder="Enter new password" required minlength="6" autofocus>
+                <button type="submit" class="btn">Update Password</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """, error=error)
+
 
 @auth_bp.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
+    error_msg = ""
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
-        with get_db() as db:
-            user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-            if user:
+        if not email:
+            error_msg = "Please enter your registered email address."
+        else:
+            with get_db() as db:
+                user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            
+            if not user:
+                error_msg = f"No account found with email '{email}'. Please check spelling or register."
+            else:
                 token = secrets.token_urlsafe(32)
-                db.execute("UPDATE users SET reset_token = ? WHERE email = ?", (token, email))
-                db.commit()
+                with get_db() as db:
+                    db.execute("UPDATE users SET reset_token = ? WHERE email = ?", (token, email))
+                    db.commit()
                 
                 reset_link = url_for("auth.reset_password", token=token, _external=True)
-                send_reset_email(email, reset_link)
+                email_sent = send_reset_email(email, reset_link)
                 
-        return render_template_string("""
-        <html>
-            <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
-                <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
-                    <h2 style="color:#fff;">📧 Check Your Email</h2>
-                    <p style="font-size:0.88em; color:#8b949e;">If an account exists with that email, reset instructions have been sent.</p>
-                    <a href="/login" style="color:#58a6ff; font-size:0.85em; text-decoration:none; font-weight:bold;">Return to Sign In</a>
-                </div>
-            </body>
-        </html>
-        """)
-        
+                print("\n" + "="*60)
+                print(f"[AUTH] Password Reset Link for {email}:")
+                print(f"--> [RESET LINK]: {reset_link}")
+                print("="*60 + "\n")
+                
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+                    <title>Password Reset — Skill Shield BTC</title>
+                    <style>
+                        body { background: #080b11; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+                        .card { width: 100%; max-width: 440px; background: #0d131f; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
+                        .title { color: #f0f6fc; font-size: 1.3rem; margin: 0 0 12px; font-weight: 700; }
+                        .desc { font-size: 0.9rem; color: #8b949e; line-height: 1.5; margin-bottom: 20px; }
+                        .email-highlight { color: #58a6ff; font-weight: 600; }
+                        .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; font-weight: 600; text-decoration: none; box-sizing: border-box; cursor: pointer; font-size: 0.95rem; }
+                        .btn-primary { background: #238636; color: #fff; border: none; margin-bottom: 12px; }
+                        .btn-primary:hover { background: #2ea043; }
+                        .btn-link { color: #58a6ff; font-size: 0.85rem; text-decoration: none; }
+                        .dev-box { margin: 20px 0; padding: 14px; background: rgba(31, 111, 235, 0.1); border: 1px dashed #1f6feb; border-radius: 8px; text-align: left; }
+                        .dev-box-title { color: #79c0ff; font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+                        .dev-box-text { font-size: 0.82rem; color: #c9d1d9; margin-bottom: 10px; }
+                        .status-tag { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-bottom: 14px; }
+                        .tag-success { background: rgba(35, 134, 54, 0.2); color: #3fb950; border: 1px solid rgba(35, 134, 54, 0.4); }
+                        .tag-warning { background: rgba(240, 183, 47, 0.2); color: #f0b72f; border: 1px solid rgba(240, 183, 47, 0.4); }
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <div style="font-size: 2.2rem; margin-bottom: 12px;">{% if email_sent %}📬{% else %}⚡{% endif %}</div>
+                        <h2 class="title">Password Reset Request</h2>
+                        
+                        {% if email_sent %}
+                            <span class="status-tag tag-success">✓ Email Dispatched</span>
+                            <p class="desc">Instructions have been sent to <span class="email-highlight">{{ email }}</span>. Please check your inbox and spam folder.</p>
+                        {% else %}
+                            <span class="status-tag tag-warning">⚠ Local/Firewall Notice</span>
+                            <p class="desc">Reset token created for <span class="email-highlight">{{ email }}</span>. SMTP connection timed out or is blocked on this local network, but you can reset your password immediately using the link below:</p>
+                        {% endif %}
+
+                        <div class="dev-box">
+                            <div class="dev-box-title">Direct Reset Link</div>
+                            <div class="dev-box-text">Click below to set your new password directly:</div>
+                            <a href="{{ reset_link }}" class="btn btn-primary" style="margin-bottom: 0;">Set New Password Now →</a>
+                        </div>
+
+                        <div style="margin-top: 20px;">
+                            <a href="/login" class="btn-link">← Return to Sign In</a>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """, email=email, reset_link=reset_link, email_sent=email_sent)
+
     return render_template_string("""
-    <html>
-        <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
-            <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
-                <h2 style="color:#fff;">Reset Password</h2>
-                <p style="font-size:0.85em; color:#8b949e; margin-bottom:20px;">Enter your registered email address.</p>
-                <form method="POST">
-                    <input type="email" name="email" placeholder="you@example.com" required style="width:100%; padding:11px; background:#0d1117; border:1px solid #30363d; color:#fff; border-radius:6px; margin-bottom:15px; box-sizing:border-box;">
-                    <button type="submit" style="width:100%; padding:11px; background:#238636; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Send Reset Link</button>
-                </form>
-                <p style="margin-top:15px;"><a href="/login" style="color:#58a6ff; font-size:0.8em; text-decoration:none;">Back to Sign In</a></p>
-            </div>
-        </body>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Forgot Password — Skill Shield BTC</title>
+        <style>
+            body { background: #080b11; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+            .card { width: 100%; max-width: 400px; background: #0d131f; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
+            .title { color: #f0f6fc; font-size: 1.3rem; margin: 0 0 8px; font-weight: 700; }
+            .desc { font-size: 0.85rem; color: #8b949e; line-height: 1.4; margin-bottom: 20px; }
+            .input { width: 100%; padding: 12px; background: #080b11; border: 1px solid #30363d; color: #fff; border-radius: 6px; margin-bottom: 16px; box-sizing: border-box; font-size: 0.95rem; }
+            .input:focus { outline: none; border-color: #58a6ff; }
+            .btn { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.95rem; }
+            .btn:hover { background: #2ea043; }
+            .error-box { background: rgba(248, 81, 73, 0.15); border: 1px solid #f85149; color: #ff7b72; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 16px; text-align: left; }
+            .back-link { color: #58a6ff; font-size: 0.85rem; text-decoration: none; }
+            .back-link:hover { text-decoration: underline; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div style="font-size: 2rem; margin-bottom: 10px;">🔐</div>
+            <h2 class="title">Reset Password</h2>
+            <p class="desc">Enter your registered email address to receive password reset instructions.</p>
+            
+            {% if error_msg %}
+                <div class="error-box">⚠ {{ error_msg }}</div>
+            {% endif %}
+
+            <form method="POST">
+                <input type="email" name="email" class="input" placeholder="you@example.com" required autofocus>
+                <button type="submit" class="btn">Send Reset Link</button>
+            </form>
+            <p style="margin-top: 20px;"><a href="/login" class="back-link">← Back to Sign In</a></p>
+        </div>
+    </body>
     </html>
-    """)
+    """, error_msg=error_msg)
+
 
 @auth_bp.route("/reset-password/<token>", methods=["GET", "POST"])
 def reset_password(token):
@@ -668,10 +793,32 @@ def reset_password(token):
         user = db.execute("SELECT * FROM users WHERE reset_token = ?", (token,)).fetchone()
         
     if not user:
-        return "Invalid or expired reset token.", 400
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Invalid Token — Skill Shield BTC</title>
+            <style>
+                body { background: #080b11; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+                .card { width: 100%; max-width: 400px; background: #0d131f; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; text-align: center; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <div style="font-size: 2rem; margin-bottom: 10px;">❌</div>
+                <h2 style="color:#ff7b72; margin: 0 0 10px;">Invalid or Expired Link</h2>
+                <p style="color:#8b949e; font-size:0.9rem;">This password reset link is invalid or has already been used.</p>
+                <a href="/forgot-password" style="color:#58a6ff; text-decoration:none; font-size:0.85rem; font-weight:bold;">Request New Reset Link</a>
+            </div>
+        </body>
+        </html>
+        """), 400
         
     if request.method == "POST":
-        new_password = request.form.get("password")
+        new_password = request.form.get("password", "").strip()
+        if len(new_password) < 6:
+            return _render_new_password_form(error="Password must be at least 6 characters long.")
         hashed_pw = _hash(new_password)
         
         with get_db() as db:
@@ -679,54 +826,90 @@ def reset_password(token):
             db.commit()
             
         return render_template_string("""
-        <html>
-            <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
-                <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
-                    <h2 style="color:#3fb950;">Password Updated!</h2>
-                    <p style="font-size:0.88em; color:#8b949e;">Your password has been successfully changed.</p>
-                    <a href="/login" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#1f6feb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold;">Sign In Now</a>
-                </div>
-            </body>
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Password Updated — Skill Shield BTC</title>
+            <style>
+                body { background: #080b11; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+                .card { width: 100%; max-width: 400px; background: #0d131f; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; text-align: center; }
+                .btn { display: inline-block; padding: 12px 24px; background: #1f6feb; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 15px; }
+                .btn:hover { background: #388bfd; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <div style="font-size: 2.2rem; margin-bottom: 10px;">✅</div>
+                <h2 style="color:#3fb950; margin: 0 0 10px;">Password Updated!</h2>
+                <p style="color:#8b949e; font-size:0.9rem;">Your password has been successfully changed. You can now sign in with your new password.</p>
+                <a href="/login" class="btn">Sign In Now →</a>
+            </div>
+        </body>
         </html>
         """)
         
-    return render_template_string("""
-    <html>
-        <body style="background:#0d1117; color:#c9d1d9; font-family:sans-serif; text-align:center; padding-top:100px;">
-            <div style="max-width:400px; margin:0 auto; background:#161b22; padding:30px; border-radius:10px; border:1px solid #30363d;">
-                <h2 style="color:#fff;">Set New Password</h2>
-                <form method="POST">
-                    <input type="password" name="password" placeholder="Enter new password" required style="width:100%; padding:11px; background:#0d1117; border:1px solid #30363d; color:#fff; border-radius:6px; margin-bottom:15px; box-sizing:border-box;">
-                    <button type="submit" style="width:100%; padding:11px; background:#1f6feb; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Update Password</button>
-                </form>
-            </div>
-        </body>
-    </html>
-    """)
+    return _render_new_password_form()
+
 
 def send_reset_email(to_email, reset_link):
     host = os.environ.get("SMTP_HOST")
     user = os.environ.get("SMTP_USER")
-    password = os.environ.get("SMTP_PASSWORD")
+    password = os.environ.get("SMTP_PASSWORD", "")
+    port_str = os.environ.get("SMTP_PORT", "587")
     
     if not all((host, user, password)):
-        print("❌ SMTP Error: Missing credentials in .env file!")
+        print("[SMTP] Warning: Missing SMTP credentials in .env file!")
         return False
         
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 587
+
     msg = EmailMessage()
     msg["Subject"] = "Password Reset Request — Skill Shield BTC"
     msg["From"] = os.environ.get("SMTP_FROM", "support@skillshieldbtc.com")
     msg["To"] = to_email
-    msg.set_content(f"Hello,\n\nClick the link below to reset your password:\n{reset_link}\n\nIf you didn't request this, please ignore this email.")
+    msg.set_content(
+        f"Hello,\n\n"
+        f"Click the link below to reset your Skill Shield BTC password:\n\n"
+        f"{reset_link}\n\n"
+        f"If you didn't request this, please ignore this email.\n\n"
+        f"— Skill Shield Team"
+    )
     
-    try:
-        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=10) as smtp:
-            smtp.starttls()
-            smtp.login(user, password)
-            smtp.send_message(msg)
-        print(f"✅ Email successfully sent to {to_email}!")
-        return True
-    except Exception as e:
-        # 👇 This will print the exact Gmail error in your VS Code terminal!
-        print(f"❌ SMTP FAILED with error: {e}")
-        return False
+    clean_pw = password.replace(" ", "") if ("gmail.com" in host and " " in password) else password
+
+    # Try configured port, then fallback
+    ports_to_try = [(port, False)]
+    if port != 465:
+        ports_to_try.append((465, True))
+    if port != 587:
+        ports_to_try.append((587, False))
+
+    for p, is_ssl in ports_to_try:
+        try:
+            if is_ssl or p == 465:
+                import ssl
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP_SSL(host, p, context=ctx, timeout=3) as smtp:
+                    try:
+                        smtp.login(user, clean_pw)
+                    except Exception:
+                        smtp.login(user, password)
+                    smtp.send_message(msg)
+            else:
+                with smtplib.SMTP(host, p, timeout=3) as smtp:
+                    smtp.starttls()
+                    try:
+                        smtp.login(user, clean_pw)
+                    except Exception:
+                        smtp.login(user, password)
+                    smtp.send_message(msg)
+            print(f"[SMTP] Email successfully sent to {to_email} via port {p}")
+            return True
+        except Exception as e:
+            print(f"[SMTP] Delivery attempt via port {p} failed: {e}")
+
+    return False

@@ -1364,16 +1364,17 @@ def dashboard():
     # ===== Auth / Trial context =====
     user_id = session.get("user_id")
     current_user = get_user_by_id(user_id) if user_id else None
+    current_user_dict = dict(current_user) if current_user else {}
     t_status = trial_status(current_user) if current_user else {"locked": False, "status": "GUEST", "hours_left": 0}
     trial_locked = t_status.get("locked", False)
     trial_status_label = t_status.get("status", "GUEST")
     trial_hours_left = t_status.get("hours_left", 0)
-    user_email = current_user.get("email", "") if current_user else ""
-    payment_status_val = current_user.get("payment_status", "INACTIVE") if current_user else "INACTIVE"
+    user_email = current_user_dict.get("email", "")
+    payment_status_val = current_user_dict.get("payment_status", "INACTIVE")
 
     # Pre-compute expiry timestamp for JS countdown (ms)
     import time as _time
-    signup_val = current_user.get("signup_ts", _time.time()) if current_user else _time.time()
+    signup_val = current_user_dict.get("signup_ts", _time.time())
     trial_expiry_ts_ms = int((signup_val + 48 * 3600) * 1000)
 
     # trial banner HTML
@@ -1404,7 +1405,7 @@ def dashboard():
     )
     nav_admin_link = (
         '<a href="/alpha-admin-portal" class="ss-nav-link" style="color:#ff5252">⚙ Admin</a>'
-        if current_user["is_admin"] else ""
+        if current_user_dict.get("is_admin") else ""
     )
     trial_lock_cls = "visible" if trial_locked else ""
 
