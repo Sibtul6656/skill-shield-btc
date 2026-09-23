@@ -2,6 +2,7 @@ import sqlite3
 import hashlib
 import os
 import sys
+import re
 import secrets
 import smtplib
 from email.message import EmailMessage
@@ -69,6 +70,8 @@ def init_db():
             ("plan_type",          "TEXT"),
             ("referred_by",        "TEXT"),
             ("reset_token",        "TEXT"),
+            ("payment_method",     "TEXT"),
+            ("sender_wallet",      "TEXT"),
         ]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
@@ -116,13 +119,21 @@ def trial_status(user) -> dict:
                 db.commit()
             return {"locked": True, "status": "expired", "hours_left": 0}
         return {"locked": False, "status": "active", "hours_left": None}
-    if user["payment_status"] == "Pending":
-        return {"locked": False, "status": "pending", "hours_left": None}
+
     expiry = datetime.utcfromtimestamp(user["signup_ts"]) + timedelta(hours=TRIAL_HOURS)
     now = datetime.utcnow()
-    if now < expiry:
-        hours_left = (expiry - now).total_seconds() / 3600
-        return {"locked": False, "status": "trial", "hours_left": round(hours_left, 1)}
+    has_trial_time = now < expiry
+    hours_left = round((expiry - now).total_seconds() / 3600, 1) if has_trial_time else 0
+
+    if user["payment_status"] == "Pending":
+        # STRICT LOCK: If trial has ended, user is strictly LOCKED until admin verifies and approves
+        if not has_trial_time:
+            return {"locked": True, "status": "pending_locked", "hours_left": 0}
+        # If user is still within their 48h initial trial window, they can browse until trial ends
+        return {"locked": False, "status": "pending_trial", "hours_left": hours_left}
+
+    if has_trial_time:
+        return {"locked": False, "status": "trial", "hours_left": hours_left}
     return {"locked": True, "status": "expired", "hours_left": 0}
 
 
@@ -610,18 +621,52 @@ def logout():
 def submit_payment():
     if "user_id" not in session:
         return redirect(url_for("auth.login_page"))
-    tx_hash   = request.form.get("tx_hash",   "").strip()
-    plan_type = request.form.get("plan_type", "monthly").strip().capitalize()  # "Monthly" or "Yearly"
+    tx_hash        = request.form.get("tx_hash",        "").strip()
+    sender_wallet  = request.form.get("sender_wallet",  "").strip()[:120]
+    payment_method = request.form.get("payment_method", "USDT (BEP-20)").strip()[:60]
+    plan_type      = request.form.get("plan_type",      "monthly").strip().capitalize()
     if plan_type not in ("Monthly", "Yearly"):
         plan_type = "Monthly"
-    if tx_hash:
-        with get_db() as db:
-            db.execute(
-                "UPDATE users SET tx_hash=?, payment_status='Pending', plan_type=? WHERE id=?",
-                (tx_hash, plan_type, session["user_id"]),
-            )
-            db.commit()
-    return redirect(url_for("dashboard"))
+
+    # Strict Validation:
+    # 1. Reject empty or obviously bogus short tx hash
+    # 2. Check for BEP-20 66-char hex hash (0x + 64 hex chars) or valid transaction reference >= 20 chars
+    is_valid_bep20 = bool(re.match(r"^0x[a-fA-F0-9]{64}$", tx_hash))
+    is_valid_ref   = len(tx_hash) >= 20 and bool(re.match(r"^[a-zA-Z0-9_\-xX]+$", tx_hash))
+
+    if not tx_hash or not (is_valid_bep20 or is_valid_ref):
+        return redirect(url_for("dashboard") + "?payment_error=invalid_hash")
+
+    user = get_user_by_id(session["user_id"])
+    if not user:
+        return redirect(url_for("auth.login_page"))
+
+    with get_db() as db:
+        db.execute(
+            """UPDATE users 
+               SET tx_hash=?, payment_status='Pending', plan_type=?, payment_method=?, sender_wallet=? 
+               WHERE id=?""",
+            (tx_hash, plan_type, payment_method, sender_wallet, user["id"]),
+        )
+        db.commit()
+
+    # Instant email notification to admin
+    notify_admin(
+        subject=f"[Skill Shield BTC] 💰 New Payment Submitted ({plan_type}): {user['email']}",
+        body=(
+            f"A user has submitted subscription payment for verification:\n\n"
+            f"User Email:      {user['email']}\n"
+            f"Plan:            {plan_type}\n"
+            f"Payment Method:  {payment_method}\n"
+            f"TxID / Hash:     {tx_hash}\n"
+            f"Sender Details:  {sender_wallet or 'Not specified'}\n"
+            f"Submitted At:    {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Audit and approve access via Admin Portal:\n"
+            f"/alpha-admin-portal\n"
+        ),
+    )
+
+    return redirect(url_for("dashboard") + "?payment_submitted=1")
 
 import secrets
 import smtplib

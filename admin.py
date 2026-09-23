@@ -20,7 +20,7 @@ body{background:#0d1117;font-family:'Inter','Segoe UI',sans-serif;color:#c9d1d9;
 .container{max-width:1400px;margin:0 auto;padding:28px 24px}
 h1{color:#fff;font-size:1.4em;font-weight:800;margin-bottom:6px}
 .subtitle{color:#8b949e;font-size:0.82em;margin-bottom:24px}
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+.stats-row{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:28px}
 .stat-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px}
 .stat-label{color:#8b949e;font-size:0.7em;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
 .stat-val{color:#fff;font-size:1.8em;font-weight:800}
@@ -37,6 +37,7 @@ tr:hover td{background:rgba(88,166,255,0.04)}
 .pill-pending{background:rgba(240,183,47,0.15);color:#f0b72f;border:1px solid rgba(240,183,47,0.3)}
 .pill-expired{background:rgba(255,82,82,0.15);color:#ff5252;border:1px solid rgba(255,82,82,0.3)}
 .pill-admin{background:rgba(255,82,82,0.08);color:#ff5252;border:1px solid rgba(255,82,82,0.2)}
+.pill-vip{background:rgba(163,113,247,0.15);color:#d2a8ff;border:1px solid rgba(163,113,247,0.35)}
 .btn-activate{background:linear-gradient(135deg,#1f6feb,#58a6ff);color:#fff;
   border:none;border-radius:6px;padding:6px 14px;font-size:0.75em;font-weight:700;
   cursor:pointer;transition:opacity 0.2s}
@@ -46,8 +47,9 @@ tr:hover td{background:rgba(88,166,255,0.04)}
 .tx-hash{font-family:monospace;font-size:0.75em;color:#8b949e;max-width:160px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .no-hash{color:#30363d;font-size:0.78em}
-@media(max-width:900px){.stats-row{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:600px){.stats-row{grid-template-columns:1fr}}
+@media(max-width:1100px){.stats-row{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.stats-row{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.stats-row{grid-template-columns:1fr}}
 </style>
 """
 
@@ -135,10 +137,26 @@ def admin_portal():
         if u["is_admin"]:
             pill = '<span class="pill pill-admin">ADMIN</span>'
 
-        tx_cell = (
-            f'<div class="tx-hash" title="{u["tx_hash"]}">{u["tx_hash"]}</div>'
-            if u["tx_hash"] else '<span class="no-hash">—</span>'
-        )
+        tx_hash_val = u["tx_hash"] if "tx_hash" in u.keys() and u["tx_hash"] else ""
+        payment_method_val = u["payment_method"] if "payment_method" in u.keys() and u["payment_method"] else ""
+        sender_wallet_val = u["sender_wallet"] if "sender_wallet" in u.keys() and u["sender_wallet"] else ""
+
+        if tx_hash_val:
+            clean_hash = tx_hash_val.strip()
+            if clean_hash.startswith("0x"):
+                hash_link = f'<a href="https://bscscan.com/tx/{clean_hash}" target="_blank" rel="noopener" style="color:#58a6ff;font-family:monospace;font-size:0.85em;text-decoration:underline;" title="Verify on BSCScan: {clean_hash}">{clean_hash[:8]}…{clean_hash[-6:]} ↗</a>'
+            else:
+                hash_link = f'<span style="font-family:monospace;font-size:0.85em;color:#e6edf3;" title="{clean_hash}">{clean_hash[:16]}…</span>'
+            
+            extra_lines = []
+            if payment_method_val:
+                extra_lines.append(f'<span style="color:#8b949e;font-size:0.7em;">{payment_method_val}</span>')
+            if sender_wallet_val:
+                extra_lines.append(f'<span style="color:#f0b72f;font-size:0.7em;" title="Sender Address: {sender_wallet_val}">From: {sender_wallet_val[:10]}…</span>')
+            
+            tx_cell = f'<div>{hash_link}</div>' + (f'<div style="margin-top:2px;">{" · ".join(extra_lines)}</div>' if extra_lines else '')
+        else:
+            tx_cell = '<span class="no-hash">—</span>'
 
         ref_cell = f'<span style="color:#79c0ff;font-size:0.8em">{referred}</span>' if referred else '<span class="no-hash">—</span>'
 
@@ -174,6 +192,63 @@ def admin_portal():
           <td>{ref_cell}</td>
           <td>{actions}</td>
         </tr>"""
+
+    # Pro Analysis Leads
+    with get_db() as db:
+        pro_leads = db.execute(
+            "SELECT * FROM pro_leads ORDER BY id DESC"
+        ).fetchall()
+    pro_leads_count = len(pro_leads)
+
+    pro_rows = ""
+    if not pro_leads:
+        pro_rows = '<tr><td colspan="5" style="color:#6e7681;text-align:center;padding:20px">No pro analysis leads yet.</td></tr>'
+    else:
+        for lead in pro_leads:
+            raw_ts = lead["submitted_ts"] if "submitted_ts" in lead.keys() else ""
+            ts_s = "—"
+            if raw_ts:
+                try:
+                    if isinstance(raw_ts, (int, float)):
+                        ts_s = datetime.utcfromtimestamp(raw_ts).strftime("%Y-%m-%d %H:%M UTC")
+                    elif isinstance(raw_ts, str):
+                        try:
+                            ts_s = datetime.utcfromtimestamp(float(raw_ts)).strftime("%Y-%m-%d %H:%M UTC")
+                        except ValueError:
+                            clean_ts = raw_ts.replace("Z", "+00:00")
+                            dt = datetime.fromisoformat(clean_ts)
+                            ts_s = dt.strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    ts_s = str(raw_ts)[:19]
+
+            name = lead["name"] if "name" in lead.keys() and lead["name"] else "—"
+            email = lead["email"] if "email" in lead.keys() and lead["email"] else "—"
+            platform = lead["platform"] if "platform" in lead.keys() and lead["platform"] else "—"
+            handle = lead["handle"] if "handle" in lead.keys() and lead["handle"] else "—"
+
+            email_cell = f'<a href="mailto:{email}" style="color:#79c0ff">{email}</a>' if email != "—" else "—"
+            
+            clean_handle = handle.lstrip("@").strip()
+            handle_link = handle
+            if platform == "Telegram" and clean_handle:
+                handle_link = f'<a href="https://t.me/{clean_handle}" target="_blank" rel="noopener" style="color:#58a6ff">{handle} ↗</a>'
+            elif platform == "WhatsApp" and clean_handle:
+                clean_phone = "".join(c for c in clean_handle if c.isdigit() or c == "+")
+                handle_link = f'<a href="https://wa.me/{clean_phone.lstrip("+")}" target="_blank" rel="noopener" style="color:#3fb950">{handle} ↗</a>'
+            elif platform == "Twitter/X" and clean_handle:
+                handle_link = f'<a href="https://x.com/{clean_handle}" target="_blank" rel="noopener" style="color:#79c0ff">{handle} ↗</a>'
+            elif platform == "Reddit" and clean_handle:
+                reddit_user = clean_handle.replace("u/", "")
+                handle_link = f'<a href="https://reddit.com/user/{reddit_user}" target="_blank" rel="noopener" style="color:#f0b72f">{handle} ↗</a>'
+
+            pro_rows += f"""
+            <tr>
+              <td style="color:#fff;font-weight:600">{name}</td>
+              <td>{email_cell}</td>
+              <td><span class="pill pill-vip">{platform}</span></td>
+              <td style="color:#e6edf3">{handle_link}</td>
+              <td style="color:#6e7681">{ts_s}</td>
+            </tr>"""
 
     # Support messages
     with get_db() as db:
@@ -235,6 +310,10 @@ def admin_portal():
       <div class="stat-label">Pending Verify</div>
       <div class="stat-val" style="color:#f0b72f">{pending_count}</div>
     </div>
+    <div class="stat-card">
+      <div class="stat-label">Pro Leads (VIP)</div>
+      <div class="stat-val" style="color:#d2a8ff">{pro_leads_count}</div>
+    </div>
   </div>
   <div class="table-wrap">
     <table>
@@ -250,6 +329,23 @@ def admin_portal():
         </tr>
       </thead>
       <tbody>{rows}</tbody>
+    </table>
+  </div>
+
+  <h1 style="margin-top:36px">Pro Analysis Signals — Leads</h1>
+  <div class="subtitle">VIP unlock form submissions — reach out to prospective traders on their preferred platform.</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Platform</th>
+          <th>Handle / Contact</th>
+          <th>Submitted</th>
+        </tr>
+      </thead>
+      <tbody>{pro_rows}</tbody>
     </table>
   </div>
 

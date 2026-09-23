@@ -20,7 +20,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 load_dotenv()
 
-from auth import auth_bp, init_db, get_user_by_id, trial_status, login_required
+from auth import auth_bp, init_db, get_db, get_user_by_id, trial_status, login_required
 from admin import admin_bp
 
 app = Flask(__name__)
@@ -1091,15 +1091,12 @@ def pro_leads():
 
     # 👇 Save the submitted lead directly into the SQLite database
     try:
-        import sqlite3
-        conn = sqlite3.connect("skillshield.db")
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO pro_leads (name, email, platform, handle, submitted_ts) VALUES (?, ?, ?, ?, ?)",
-            (lead["name"], lead["email"], lead["platform"], lead["handle"], lead["submitted_at"])
-        )
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO pro_leads (name, email, platform, handle, submitted_ts) VALUES (?, ?, ?, ?, ?)",
+                (lead["name"], lead["email"], lead["platform"], lead["handle"], lead["submitted_at"])
+            )
+            conn.commit()
     except Exception as e:
         print("Pro Lead DB Insert Error:", e)
 
@@ -1113,6 +1110,22 @@ def pro_leads():
             delivered = False
             
     emailed = _send_pro_welcome_email(lead)
+
+    try:
+        from notify import notify_admin
+        notify_admin(
+            subject=f"[Skill Shield BTC] New Pro Analysis Signal Lead: {lead['name']}",
+            body=(
+                f"A user unlocked Pro Analysis Signals.\n\n"
+                f"Name:     {lead['name']}\n"
+                f"Email:    {lead['email']}\n"
+                f"Platform: {lead['platform']}\n"
+                f"Handle:   {lead['handle']}\n\n"
+                f"— View all leads in the admin portal under Pro Analysis Signals."
+            ),
+        )
+    except Exception:
+        pass
     
     return jsonify({"ok": True, "sheet_delivered": delivered, "welcome_sent": emailed})
 
@@ -1372,6 +1385,16 @@ def dashboard():
     user_email = current_user_dict.get("email", "")
     payment_status_val = current_user_dict.get("payment_status", "INACTIVE")
 
+    # Check if current user has already unlocked Pro Signals
+    pro_unlocked_flag = "false"
+    if user_email:
+        try:
+            with get_db() as db:
+                if db.execute("SELECT id FROM pro_leads WHERE lower(email) = ?", (user_email.lower(),)).fetchone():
+                    pro_unlocked_flag = "true"
+        except Exception:
+            pass
+
     # Pre-compute expiry timestamp for JS countdown (ms)
     import time as _time
     signup_val = current_user_dict.get("signup_ts", _time.time())
@@ -1391,12 +1414,64 @@ def dashboard():
                 View Plans — $99/mo or $999/yr
             </button>
         </div>"""
-    elif trial_status_label in ("pending",):
-        trial_banner_html = '<div class="trial-notice-bar" style="background:rgba(240,183,47,0.12);border-color:rgba(240,183,47,0.3);color:#f0b72f;">⏳ Payment submitted — your TxID is under review. Access continues until verification is complete.</div>'
+    elif trial_status_label in ("pending", "pending_locked", "pending_trial"):
+        trial_banner_html = '<div class="trial-notice-bar" style="background:rgba(240,183,47,0.12);border-color:rgba(240,183,47,0.3);color:#f0b72f;">⏳ Payment submitted — your TxID is awaiting admin verification. Access will activate once verified.</div>'
     elif trial_status_label == "active":
         trial_banner_html = ""
     else:
         trial_banner_html = ""
+
+    # Pre-compute lock overlay content based on payment status
+    if payment_status_val == "Pending":
+        user_tx = current_user_dict.get("tx_hash", "") or ""
+        short_tx = (user_tx[:10] + "…" + user_tx[-8:]) if len(user_tx) > 18 else (user_tx or "—")
+        user_plan = current_user_dict.get("plan_type", "Monthly") or "Monthly"
+        lock_modal_inner = f"""
+                    <div class="lock-icon">⏳</div>
+                    <div class="lock-title">Payment Verification Pending</div>
+                    <div class="lock-body">
+                        Your payment for the <b>{user_plan} Plan</b> has been submitted and is currently being audited on-chain.
+                        Full access will be activated immediately once verified by our administration team.
+                    </div>
+                    <div style="background:rgba(240,183,47,0.1);border:1px solid rgba(240,183,47,0.3);border-radius:8px;padding:10px 14px;color:#f0b72f;font-size:0.8em;margin-bottom:16px;text-align:left;">
+                        <div><b>Submitted TxID:</b> <code style="word-break:break-all;color:#fff;">{short_tx}</code></div>
+                        <div style="color:#8b949e;font-size:0.9em;margin-top:4px;">Status: Awaiting Admin Approval</div>
+                    </div>
+                    <div class="lock-btns">
+                        <button class="lock-btn-crypto"
+                            onclick="document.getElementById('trial-lock-overlay').style.display='none';
+                                     document.getElementById('payment-modal').style.display='flex';">
+                            Update Payment Details
+                        </button>
+                    </div>
+                    <div class="lock-disclaimer">
+                        Need quick approval? Contact <a href="mailto:support@skillshieldbtc.com" style="color:#79c0ff">support@skillshieldbtc.com</a>
+                    </div>"""
+    else:
+        lock_modal_inner = """
+                    <div class="lock-icon">🔒</div>
+                    <div class="lock-title">Trial Period Ended</div>
+                    <div class="lock-body">
+                        Your free trial has ended. Continue with live mempool data, whale flow
+                        tracking, and network velocity signals on a monthly or annual plan.
+                    </div>
+                    <div class="lock-price">$99<span>/month</span> or $999<span>/year</span></div>
+                    <div class="lock-btns">
+                        <button class="lock-btn-crypto"
+                            onclick="document.getElementById('trial-lock-overlay').style.display='none';
+                                     document.getElementById('payment-modal').style.display='flex';">
+                            💎 Pay with Crypto (USDT)
+                        </button>
+                        <button class="lock-btn-alt"
+                            onclick="document.getElementById('trial-lock-overlay').style.display='none';
+                                     document.getElementById('payment-modal').style.display='flex';
+                                     switchPayTab('alt');">
+                            💳 Card / Alternative
+                        </button>
+                    </div>
+                    <div class="lock-disclaimer">
+                        Secure · Cancel anytime · No hidden fees
+                    </div>"""
 
     # Pre-compute nav variables (avoid backslash in f-string)
     nav_upgrade_btn = (
@@ -3985,29 +4060,7 @@ def dashboard():
             <div class="trial-lock-overlay {trial_lock_cls}" id="trial-lock-overlay"
                  role="dialog" aria-modal="true" aria-label="Trial Expired — Upgrade Required">
                 <div class="lock-modal">
-                    <div class="lock-icon">🔒</div>
-                    <div class="lock-title">Trial Period Ended</div>
-                    <div class="lock-body">
-                        Your free trial has ended. Continue with live mempool data, whale flow
-                        tracking, and network velocity signals on a monthly or annual plan.
-                    </div>
-                    <div class="lock-price">$99<span>/month</span> or $999<span>/year</span></div>
-                    <div class="lock-btns">
-                        <button class="lock-btn-crypto"
-                            onclick="document.getElementById('trial-lock-overlay').style.display='none';
-                                     document.getElementById('payment-modal').style.display='flex';">
-                            💎 Pay with Crypto (USDT)
-                        </button>
-                        <button class="lock-btn-alt"
-                            onclick="document.getElementById('trial-lock-overlay').style.display='none';
-                                     document.getElementById('payment-modal').style.display='flex';
-                                     switchPayTab('alt');">
-                            💳 Card / Alternative
-                        </button>
-                    </div>
-                    <div class="lock-disclaimer">
-                        Secure · Cancel anytime · No hidden fees
-                    </div>
+{lock_modal_inner}
                 </div>
             </div>
 
@@ -4078,13 +4131,25 @@ def dashboard():
                         <div class="pay-section-title">✅ Submit Your Transaction Hash</div>
                         <form method="POST" action="/submit-payment">
                             <input type="hidden" name="plan_type" id="selected-plan-input" value="monthly">
+                            <input type="hidden" name="payment_method" value="USDT (BEP-20)">
+
+                            <label style="display:block;font-size:0.75em;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;font-weight:600;">Transaction Hash (TxID) *</label>
                             <input class="pay-input" type="text" name="tx_hash" id="tx-hash-input"
-                                   placeholder="Paste TxID / Transaction Hash here…" required>
-                            <div style="color:#8b949e;font-size:0.72em;margin-bottom:6px;">
-                                Found in your wallet's transaction history. Starts with 0x…
+                                   placeholder="0x… (66-character BEP-20 transaction hash)"
+                                   pattern="^0x[a-fA-F0-9]{{64}}$"
+                                   title="Enter valid 66-character BSC transaction hash starting with 0x"
+                                   required style="margin-bottom:6px;">
+                            <div style="color:#8b949e;font-size:0.72em;margin-bottom:10px;">
+                                Starts with 0x followed by 64 hex characters from your wallet transaction receipt.
                             </div>
+
+                            <label style="display:block;font-size:0.75em;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;font-weight:600;">Sender Wallet / Exchange (Optional)</label>
+                            <input class="pay-input" type="text" name="sender_wallet" id="sender-wallet-input"
+                                   placeholder="e.g. 0xYourSenderAddress or Binance / TrustWallet"
+                                   maxlength="120" style="margin-bottom:12px;">
+
                             <div style="background:rgba(240,183,47,0.08);border:1px solid rgba(240,183,47,0.25);border-radius:8px;padding:10px 12px;color:#f0b72f;font-size:0.75em;line-height:1.5;margin-bottom:12px;">
-                                ⏱ Once your TxID is submitted, your transaction is queued and manually audited within <b>2–4 hours</b> for plan activation. You will retain full access during this review window.
+                                ⏱ <b>Manual Audit Required:</b> Once your TxID is submitted, an administrator will audit your transaction on-chain. Access activates immediately upon admin verification.
                             </div>
                             <button type="submit" class="pay-submit">🚀 Submit for Verification</button>
                         </form>
@@ -4139,7 +4204,7 @@ def dashboard():
                                 </div>
                                 <div class="pro-field">
                                     <label for="pro-email">Email Address</label>
-                                    <input id="pro-email" name="email" type="email" maxlength="254" required placeholder="you@example.com">
+                                    <input id="pro-email" name="email" type="email" maxlength="254" required placeholder="you@example.com" value="{user_email}">
                                 </div>
                                 <div class="pro-field">
                                     <label for="pro-platform">Preferred Contact Platform</label>
@@ -4663,7 +4728,16 @@ def dashboard():
                 // ===== Pro Analysis Signals =====
                 var _proAnalysis = null;
                 var _proChart = null;
-                var PRO_LEAD_KEY = 'skillshield_pro_access_v1';
+                var _userProUnlocked = {pro_unlocked_flag};
+                var _currentUserEmail = '{user_email}';
+                var PRO_LEAD_KEY = 'skillshield_pro_' + encodeURIComponent(_currentUserEmail.toLowerCase());
+
+                function showProForm() {{
+                    var form = document.getElementById('pro-lead-form-wrap');
+                    var dashboard = document.getElementById('pro-dashboard');
+                    if (form) form.style.display = 'block';
+                    if (dashboard) dashboard.classList.remove('show');
+                }}
 
                 function openProSignals() {{
                     var modal = document.getElementById('pro-modal');
@@ -4671,8 +4745,17 @@ def dashboard():
                     modal.classList.add('visible');
                     document.body.style.overflow = 'hidden';
                     try {{
-                        if (localStorage.getItem(PRO_LEAD_KEY)) showProDashboard();
+                        localStorage.removeItem('skillshield_pro_access_v1');
                     }} catch (e) {{}}
+                    try {{
+                        if (_userProUnlocked || localStorage.getItem(PRO_LEAD_KEY) === '1') {{
+                            showProDashboard();
+                        }} else {{
+                            showProForm();
+                        }}
+                    }} catch (e) {{
+                        showProForm();
+                    }}
                 }}
                 function closeProSignals() {{
                     var modal = document.getElementById('pro-modal');
@@ -4801,7 +4884,11 @@ def dashboard():
                         var payload = Object.fromEntries(new FormData(form).entries());
                         fetch('/pro-leads', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(payload)}})
                             .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.error || 'Please check the form.'); return body; }}); }})
-                            .then(function() {{ localStorage.setItem(PRO_LEAD_KEY, '1'); showProDashboard(); }})
+                            .then(function() {{
+                                try {{ localStorage.setItem(PRO_LEAD_KEY, '1'); }} catch(e) {{}}
+                                _userProUnlocked = true;
+                                showProDashboard();
+                            }})
                             .catch(function(err) {{ error.textContent = err.message; error.style.display = 'block'; btn.disabled = false; btn.textContent = '[ Unlock Free Pro Access ]'; }});
                     }});
                 }})();
