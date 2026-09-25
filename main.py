@@ -8,7 +8,7 @@ import time
 import os
 import smtplib
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from email.message import EmailMessage
 from urllib.parse import quote
@@ -1335,6 +1335,165 @@ def compute_whale_summary():
         "session_color":        session_color,
         "session_points":       len(_HISTORY),
     }
+
+
+def build_live_feed_payload() -> dict:
+    """Aggregate core on-chain intelligence for the B2B master API feed."""
+    stats = get_whale_data()
+    whales = get_top_whale_transactions()
+    market_price = float(stats["market_price_usd"]) if (stats and "market_price_usd" in stats) else 0.0
+    blocks_mined = stats.get("n_blocks_mined", 0) if stats else 0
+    n_tx = stats.get("n_tx", 0) if stats else 0
+
+    # 1. Liquidity Velocity
+    baseline_tpm = get_24h_baseline_tpm()
+    velocity = compute_velocity(get_all_tx_times(), baseline_tpm)
+
+    # 2. News & Sentiment
+    news = correlate_news(get_crypto_news(), whales)
+    sentiment = compute_sentiment(whales)
+
+    # 3. Institutional Intel & Flow
+    intel = compute_intelligence(velocity, news, sentiment)
+    all_txs = _fetch_mempool_txs()
+    flow = compute_flow(all_txs)
+
+    # 4. Fear & Greed / Risk
+    fear_greed = compute_fear_greed(velocity, flow, intel)
+
+    # 5. Mempool Stress & Integrity
+    integrity = check_data_integrity(baseline_tpm)
+    alert_count = sum(1 for w in whales if w.get("total_btc", 0) >= ALERT_THRESHOLD_BTC)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "status": "success",
+        "timestamp_utc": now_iso,
+        "market_data": {
+            "btc_price_usd": market_price,
+            "blocks_mined": blocks_mined,
+        },
+        "liquidity_velocity": {
+            "current_tpm": round(velocity.get("current_tpm", 0.0), 2),
+            "baseline_24h_tpm": round(velocity.get("baseline_tpm", 0.0), 2),
+            "velocity_ratio": round(velocity.get("ratio", 0.0), 3),
+            "status": velocity.get("label", "NORMAL"),
+            "color": velocity.get("color", "#f0b72f"),
+            "description": velocity.get("detail", ""),
+        },
+        "mempool_stress": {
+            "status": integrity.get("label", "SOLID"),
+            "unconfirmed_count": len(all_txs) if all_txs else n_tx,
+            "data_integrity": integrity.get("label", "SOLID"),
+            "cache_age_seconds": integrity.get("cache_age", 0),
+        },
+        "institutional_order_flow": {
+            "signal": flow.get("signal", "BALANCED"),
+            "net_btc": flow.get("net_btc", 0.0),
+            "accumulation_btc": flow.get("accum_btc", 0.0),
+            "distribution_btc": flow.get("distrib_btc", 0.0),
+            "consolidation_btc": flow.get("consol_btc", 0.0),
+            "whale_alerts_count": alert_count,
+        },
+        "risk_and_sentiment": {
+            "fear_greed_score": fear_greed.get("score", 50),
+            "fear_greed_label": fear_greed.get("label", "NEUTRAL"),
+            "intelligence_bias": intel.get("label", "NEUTRAL"),
+            "sentiment_label": sentiment.get("label", "Neutral"),
+            "sentiment_score": round(sentiment.get("score", 0.0), 3),
+        },
+    }
+
+
+# Active B2B API Keys Registry
+# Format: key -> { "client": str, "active": bool, "expires_at": "YYYY-MM-DD" or None, "tier": str }
+API_KEYS = {
+    # Ready-to-use trial key to deliver to the client for marketplaces & external agents
+    "ssbtc_live_trial_9f8e7d6c5b4a": {
+        "client": "B2B Marketplace Trial Client",
+        "active": True,
+        "expires_at": "2027-01-01",
+        "tier": "trial",
+    },
+    # Master key for internal services, AI agents, and persistent integrations
+    "ssbtc_live_master_k8j7h6g5f4d3": {
+        "client": "Skill Shield Internal / Master AI Agent",
+        "active": True,
+        "expires_at": None,
+        "tier": "enterprise",
+    },
+}
+
+
+def validate_api_key(provided_key: str):
+    """Validate incoming x-api-key against active keys and expiration date."""
+    if not provided_key:
+        return False, "Missing 'x-api-key' header. Please supply your API key.", 401
+
+    key_record = API_KEYS.get(provided_key.strip())
+    if not key_record:
+        return False, "Invalid API key.", 401
+
+    if not key_record.get("active", False):
+        return False, "This API key has been deactivated.", 403
+
+    expires_at = key_record.get("expires_at")
+    if expires_at:
+        try:
+            exp_date = datetime.strptime(expires_at, "%Y-%m-%d").date()
+            if datetime.now(timezone.utc).date() > exp_date:
+                return False, "This API key has expired.", 403
+        except Exception:
+            pass
+
+    return True, key_record, 200
+
+
+# In-memory cache for /api/v1/live-feed (45-second TTL)
+_LIVE_FEED_CACHE = {
+    "payload": None,
+    "cached_at": 0.0,
+    "ttl": 45.0,  # 45 seconds (within client's 30-60 second requirement)
+}
+
+
+@app.route("/api/v1/live-feed", methods=["GET"])
+def api_v1_live_feed():
+    """Unified master JSON endpoint with API key authentication and 45s in-memory caching."""
+    # 1. Authenticate via x-api-key header (or ?api_key= query param for browser testing)
+    api_key = request.headers.get("x-api-key") or request.args.get("api_key")
+    is_valid, auth_result, status_code = validate_api_key(api_key)
+    if not is_valid:
+        return jsonify({
+            "status": "error",
+            "error": "Unauthorized" if status_code == 401 else "Forbidden",
+            "message": auth_result,
+            "hint": "Include 'x-api-key: <your_key>' in your HTTP request headers."
+        }), status_code
+
+    # 2. In-Memory Cache check
+    now = time.time()
+    cached_payload = _LIVE_FEED_CACHE.get("payload")
+    cached_at = _LIVE_FEED_CACHE.get("cached_at", 0.0)
+    ttl = _LIVE_FEED_CACHE.get("ttl", 45.0)
+
+    # Cache HIT: Return cached JSON instantly
+    if cached_payload and (now - cached_at) < ttl:
+        response = jsonify(cached_payload)
+        response.headers["X-Cache"] = "HIT"
+        response.headers["X-Cache-Remaining-Seconds"] = str(int(ttl - (now - cached_at)))
+        return response, 200
+
+    # Cache MISS: Calculate fresh payload and update the cache
+    payload = build_live_feed_payload()
+    _LIVE_FEED_CACHE["payload"] = payload
+    _LIVE_FEED_CACHE["cached_at"] = now
+
+    response = jsonify(payload)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Cache-Remaining-Seconds"] = str(int(ttl))
+    return response, 200
 
 
 @app.route("/")

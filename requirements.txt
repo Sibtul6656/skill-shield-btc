@@ -2,3 +2,4 @@ flask
 requests
 gunicorn
 python-dotenv
+mcp>=1.0.0
